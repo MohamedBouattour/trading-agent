@@ -1,0 +1,38 @@
+services:
+  trading-bot:
+    image: devmed555/trading-bot:latest
+    build: .
+    container_name: trading-bot-btcusdt
+    restart: unless-stopped
+
+    environment:
+      # ── Trading params ──────────────────────────────────────────
+      - TICKER=BTCUSDT
+      - LEVERAGE=5
+      - TRADE_USDT=100          # USDT margin per trade (notional = 500 USDT at 5x)
+      - DRY_RUN=false           # Set to "true" to simulate without placing orders
+
+      # ── Gemini ─────────────────────────────────────────────────
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - QUICK_THINK_MODEL=gemini-2.5-flash
+
+      # ── Binance Futures ─────────────────────────────────────────
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+
+      # ── Paths ──────────────────────────────────────────────────
+      - RESULTS_DIR=/app/results
+      - LOG_FILE=/app/logs/bot.log
+      - TZ=UTC
+
+    volumes:
+      # Persist analysis state files across restarts
+      - ./results:/app/results
+      # Persist trade log across restarts
+      - ./logs:/app/logs
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"

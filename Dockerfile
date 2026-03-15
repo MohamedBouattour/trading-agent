@@ -1,0 +1,67 @@
+# ─── Stage 1: Builder ────────────────────────────────────────────────────────
+FROM node:22-slim AS builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+RUN pnpm config set registry-enable-ipv6 false
+
+COPY package.json pnpm-lock.yaml ./
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+
+COPY tsconfig.json tsup.config.ts ./
+COPY src ./src
+
+# ─── Stage 2: Runner ─────────────────────────────────────────────────────────
+FROM node:22-slim AS runner
+
+RUN apt-get update && apt-get install -y cron tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy full source + node_modules from builder (tsup external bundling needs them)
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/src ./src
+COPY --from=builder /app/tsconfig.json ./
+
+# Create directories
+RUN mkdir -p /app/results /app/logs
+
+# ─── Cron schedule ────────────────────────────────────────────────────────────
+# Install tsx globally for cron to use
+RUN npm install -g tsx
+
+RUN echo "* * * * * root . /etc/environment && cd /app && npx tsx src/decision-maker/bot.ts >> /app/logs/bot.log 2>&1" > /etc/cron.d/bot-cron \
+    && chmod 0644 /etc/cron.d/bot-cron \
+    && crontab /etc/cron.d/bot-cron
+
+# ─── Environment defaults ─────────────────────────────────────────────────────
+ENV TICKER=BTCUSDT
+ENV LEVERAGE=5
+ENV TRADE_USDT=100
+ENV RESULTS_DIR=/app/results
+ENV LOG_FILE=/app/logs/bot.log
+ENV TZ=UTC
+ENV NODE_ENV=production
+
+# ─── Startup ───
+COPY <<'EOF' /app/entrypoint.sh
+#!/bin/sh
+set -e
+echo "[entrypoint] Starting TradingBot container at $(date -u)"
+echo "[entrypoint] TICKER=$TICKER  LEVERAGE=${LEVERAGE}x  TRADE_USDT=$TRADE_USDT  DRY_RUN=${DRY_RUN:-false}"
+
+# Export all current environment variables for cron
+env >> /etc/environment
+
+echo "[entrypoint] Running initial decision..."
+cd /app && /usr/local/lib/node_modules/tsx/dist/cli.mjs src/decision-maker/bot.ts >> /app/logs/bot.log 2>&1 || true
+echo "[entrypoint] Starting cron..."
+exec cron -f
+EOF
+
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]

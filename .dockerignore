@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.gitignore
+*.log
+logs
+results
+.env
+.env.local
+.env.*.local
+data_cache
+plan.md
+roadmap.md
+vitest.config.ts
