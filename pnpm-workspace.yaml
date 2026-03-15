@@ -1,0 +1,3 @@
+packages:
+  - "services/ai-analyzer"
+  - "services/trading-bot"

@@ -1,0 +1,22 @@
+{
+  "name": "trading-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsup",
+    "bot": "tsx src/index.ts",
+    "bot:dry": "DRY_RUN=true tsx src/index.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.32",
+    "@langchain/google-genai": "^2.1.25",
+    "dotenv": "^17.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

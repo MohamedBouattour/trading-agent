@@ -1,0 +1,46 @@
+{
+  "name": "ai-analyzer",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "decide": "tsx src/decision-maker.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsup",
+    "test": "vitest",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "@binance/connector": "^3.6.1",
+    "@langchain/community": "^1.1.23",
+    "@langchain/core": "^1.1.32",
+    "@langchain/google-genai": "^2.1.25",
+    "@langchain/google-vertexai": "^2.1.25",
+    "@langchain/langgraph": "^1.2.2",
+    "@langchain/ollama": "^1.2.6",
+    "@langchain/openai": "^1.2.13",
+    "axios": "^1.13.6",
+    "cli-progress": "^3.12.0",
+    "dotenv": "^17.3.1",
+    "ink": "^6.8.0",
+    "inquirer": "^13.3.0",
+    "langchain": "^1.2.32",
+    "ora": "^9.3.0",
+    "react": "^19.2.4",
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/cli-progress": "^3.11.6",
+    "@types/inquirer": "^9.0.9",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

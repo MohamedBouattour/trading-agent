@@ -43,6 +43,7 @@ const RESULTS_DIR = process.env.RESULTS_DIR ?? "./results";
 const DRY_RUN = process.env.DRY_RUN === "true";
 const FUTURES_BASE = "https://fapi.binance.com";
 const LOG_FILE = process.env.LOG_FILE ?? "/app/logs/bot.log";
+const DECISIONS_FILE = path.resolve(RESULTS_DIR, TICKER + "_decisions.json");
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -68,16 +69,11 @@ function log(
 
   const line = `[${ts}] [${levelStr}] ${cleanMsg}`;
 
+  // Note: We only console.log here. Docker cron is configured with `>> /app/logs/bot.log 2>&1`,
+  // so if we ALSO wrote to fs.appendFileSync here, it would appear twice in the file.
   if (level === "ERROR") console.error(line);
   else if (level === "WARN") console.warn(line);
   else console.log(line);
-
-  try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
-    fs.appendFileSync(LOG_FILE, line + "\n", "utf-8");
-  } catch {
-    /* ignore log write errors */
-  }
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -200,6 +196,18 @@ async function getPositionRisk(symbol: string): Promise<PositionRisk> {
   };
 }
 
+/** Get available USDT balance */
+async function getUsdtBalance(): Promise<number> {
+  const data = await futuresGet("/fapi/v2/balance");
+  if (Array.isArray(data)) {
+    const usdt = data.find((a: any) => a.asset === "USDT");
+    if (usdt) {
+      return parseFloat(usdt.availableBalance ?? "0");
+    }
+  }
+  return 0;
+}
+
 /** Get latest mark price for size calculation */
 async function getMarkPrice(symbol: string): Promise<number> {
   const raw = await rawGet(
@@ -278,8 +286,13 @@ async function cancelAllOpenOrders(symbol: string): Promise<void> {
 }
 
 /**
- * Place a STOP_MARKET or TAKE_PROFIT_MARKET exit order.
- * Using closePosition=true closes the entire position safely.
+ * Place a STOP_MARKET or TAKE_PROFIT_MARKET exit order via the Binance
+ * Futures **Algo Order** endpoint: POST /fapi/v1/algoOrder
+ *
+ * The standard /fapi/v1/order returns -4120 for these order types.
+ * The algo endpoint requires:
+ *   - algoType: "CONDITIONAL"
+ *   - closePosition: "true" (auto-closes the full position, no qty needed)
  */
 async function placeExitOrder(
   symbol: string,
@@ -288,6 +301,7 @@ async function placeExitOrder(
   stopPrice: number,
 ): Promise<void> {
   const priceStr = stopPrice.toFixed(2);
+
   if (DRY_RUN) {
     log(
       "[DRY_RUN] " +
@@ -305,13 +319,17 @@ async function placeExitOrder(
     symbol,
     side,
     type,
-    stopPrice: priceStr,
+    algoType: "CONDITIONAL",
+    triggerPrice: priceStr,
     closePosition: "true",
-    timeInForce: "GTC",
   };
-  const res = await futuresPost("/fapi/v1/order", params);
+  const res = await futuresPost("/fapi/v1/algoOrder", params);
   if (res.code) {
-    log("⚠ Failed to place " + type + ": " + JSON.stringify(res));
+    if (res.code === -4130) {
+      log("TP/SL " + type + " already exists for " + symbol + " – skipping.");
+    } else {
+      log("⚠ Failed to place " + type + ": " + JSON.stringify(res));
+    }
   } else {
     log(
       "Exit Order placed → " +
@@ -320,8 +338,8 @@ async function placeExitOrder(
         side +
         " @ " +
         priceStr +
-        " orderId:" +
-        res.orderId,
+        " algoId:" +
+        (res.algoId ?? res.clientAlgoId ?? "ok"),
     );
   }
 }
@@ -583,17 +601,22 @@ async function getDecision(
     "{",
     '  "decision": "BUY" | "SELL" | "HODL",',
     '  "reason": "Brief explanation of your decision",',
-    '  "tp": number | null, // take profit price level, or null if none',
-    '  "sl": number | null  // stop loss price level, or null if none',
+    '  "tp": number,  // REQUIRED – take profit price level (never null)',
+    '  "sl": number   // REQUIRED – stop loss price level (never null)',
     "}",
     "",
-    "Rules for SL/TP:",
-    "- If you suggest BUY (LONG) or currently hold LONG, TP should be > current price, SL should be < current price.",
-    "- If you suggest SELL (SHORT) or currently hold SHORT, TP should be < current price, SL should be > current price.",
-    "- Base them on recent structural highs/lows (e.g. recent wick lows for SL on a long).",
+    "Rules for SL/TP (MANDATORY – you MUST always provide both tp and sl as numbers):",
+    "- For BUY/LONG: tp MUST be strictly above the current mark price, sl MUST be strictly below.",
+    "- For SELL/SHORT: tp MUST be strictly below the current mark price, sl MUST be strictly above.",
+    "- For HODL: use the same direction as the current open position to calculate tp/sl. If FLAT, use the nearest swing high as tp and swing low as sl.",
+    "- Base sl on the most recent structural swing low (for longs) or swing high (for shorts) from the 500 candles provided.",
+    "- Base tp on the nearest resistance (for longs) or support (for shorts) from the 500 candles provided.",
+    "- Risk/reward ratio must be at least 1.5:1 (tp distance >= 1.5x sl distance from entry).",
+    "- NEVER return null for tp or sl.",
+    "- Output HODL if there is no clear signal, OR if your suggested trade direction is already the same as the current open position.",
     "",
     "Look for: EMA crossovers, RSI divergence/extremes, volume spikes, candlestick patterns,",
-    "momentum (consecutive candles), price relative to VWAP/EMA.",
+    "momentum (consecutive candles), price relative to EMA9/EMA21.",
     "",
     "=== CURRENT POSITION (" + ticker + ") ===",
     positionSection,
@@ -604,7 +627,7 @@ async function getDecision(
     "=== LIVE BINANCE 1H CANDLES (500) ===",
     candleSection,
     "",
-    "Reply ONLY with the JSON format requested above.",
+    "Reply ONLY with the JSON. tp and sl must always be numbers.",
   ].join("\n");
 
   const response = await model.invoke([new HumanMessage(prompt)]);
@@ -621,25 +644,251 @@ async function getDecision(
 
   try {
     const parsed = JSON.parse(text);
-    const result: DecisionOutput = {
-      decision: ["BUY", "SELL"].includes(parsed.decision)
-        ? parsed.decision
-        : "HODL",
-      reason: parsed.reason || "No reason",
-      tp: typeof parsed.tp === "number" ? parsed.tp : null,
-      sl: typeof parsed.sl === "number" ? parsed.sl : null,
-    };
-    return result;
+    const decision: DecisionOutput["decision"] = ["BUY", "SELL"].includes(
+      parsed.decision?.toUpperCase(),
+    )
+      ? (parsed.decision.toUpperCase() as "BUY" | "SELL")
+      : "HODL";
+
+    let tp: number | null = typeof parsed.tp === "number" ? parsed.tp : null;
+    let sl: number | null = typeof parsed.sl === "number" ? parsed.sl : null;
+
+    // Fallback: auto-calculate TP/SL from candles if model omitted them
+    if (tp === null || sl === null) {
+      log(
+        "⚠  Model did not return tp/sl – calculating fallback from ATR and swing levels.",
+      );
+      const fallback = calcAtrFallbackTpSl(
+        candles,
+        decision,
+        position.markPrice,
+      );
+      if (tp === null) tp = fallback.tp;
+      if (sl === null) sl = fallback.sl;
+      log("Fallback TP: " + tp?.toFixed(2) + "  SL: " + sl?.toFixed(2));
+    }
+
+    return { decision, reason: parsed.reason || "No reason", tp, sl };
   } catch (err) {
     log(
       "⚠  Could not parse JSON decision from model output: " +
         text.slice(0, 200),
     );
-    return { decision: "HODL", reason: "Parse error", tp: null, sl: null };
+    // Full fallback on parse error – assume HODL but still compute levels
+    const fallback = calcAtrFallbackTpSl(candles, "HODL", position.markPrice);
+    return {
+      decision: "HODL",
+      reason: "Parse error",
+      tp: fallback.tp,
+      sl: fallback.sl,
+    };
+  }
+}
+
+/**
+ * ATR-based TP/SL fallback.
+ * Uses 14-period ATR from the last 20 candles to set SL at 1.5×ATR and TP at 2.5×ATR
+ * in the appropriate direction. Also clamps to the swing high/low of the last 20 candles.
+ */
+function calcAtrFallbackTpSl(
+  candles: Candle[],
+  decision: "BUY" | "SELL" | "HODL",
+  markPrice: number,
+): { tp: number; sl: number } {
+  const last20 = candles.slice(-20);
+
+  // ATR over last 20 candles
+  let atrSum = 0;
+  for (let i = 1; i < last20.length; i++) {
+    const h = parseFloat(last20[i].high);
+    const l = parseFloat(last20[i].low);
+    const prevC = parseFloat(last20[i - 1].close);
+    atrSum += Math.max(h - l, Math.abs(h - prevC), Math.abs(l - prevC));
+  }
+  const atr = atrSum / (last20.length - 1);
+
+  // Swing levels
+  const swingHigh = Math.max(...last20.map((c) => parseFloat(c.high)));
+  const swingLow = Math.min(...last20.map((c) => parseFloat(c.low)));
+
+  if (decision === "SELL") {
+    // SHORT: sl above mark, tp below mark
+    const sl = Math.min(markPrice + atr * 1.5, swingHigh);
+    const tp = Math.max(markPrice - atr * 2.5, swingLow);
+    return { tp, sl };
+  } else {
+    // BUY or HODL (LONG): sl below mark, tp above mark
+    const sl = Math.max(markPrice - atr * 1.5, swingLow);
+    const tp = Math.min(markPrice + atr * 2.5, swingHigh);
+    return { tp, sl };
   }
 }
 
 // ─── Trade execution ──────────────────────────────────────────────────────────
+
+async function ensureTpSl(
+  symbol: string,
+  exitSide: "BUY" | "SELL",
+  tp: number | null,
+  sl: number | null,
+  markPrice: number,
+): Promise<void> {
+  let slPlaced = false;
+  let tpPlaced = false;
+
+  // Cancel existing conditional algo orders for this symbol so we can
+  // replace them with the latest TP/SL levels from the model each run.
+  if (!DRY_RUN) {
+    try {
+      const res = await futuresGet("/fapi/v1/openAlgoOrders", {
+        algoType: "CONDITIONAL",
+      });
+      let algoOrders: any[] = [];
+      if (Array.isArray(res)) algoOrders = res;
+      else if (res?.rows && Array.isArray(res.rows)) algoOrders = res.rows;
+
+      const symbolOrders = algoOrders.filter((o: any) => o.symbol === symbol);
+      log(
+        "Found " +
+          symbolOrders.length +
+          " existing algo orders for " +
+          symbol +
+          ".",
+      );
+
+      for (const o of symbolOrders) {
+        const algoId = o.algoId ?? o.algoOrderId;
+        const currentStopPrice = parseFloat(o.stopPrice || "0");
+
+        // If the order perfectly matches our desired SL, keep it
+        if (
+          o.side === exitSide &&
+          o.type === "STOP_MARKET" &&
+          sl !== null &&
+          Math.abs(currentStopPrice - sl) < 0.0001
+        ) {
+          log(
+            "SL order " +
+              algoId +
+              " already at correct price (" +
+              sl +
+              ") - keeping.",
+          );
+          slPlaced = true;
+          continue;
+        }
+
+        // If the order perfectly matches our desired TP, keep it
+        if (
+          o.side === exitSide &&
+          o.type === "TAKE_PROFIT_MARKET" &&
+          tp !== null &&
+          Math.abs(currentStopPrice - tp) < 0.0001
+        ) {
+          log(
+            "TP order " +
+              algoId +
+              " already at correct price (" +
+              tp +
+              ") - keeping.",
+          );
+          tpPlaced = true;
+          continue;
+        }
+
+        if (algoId) {
+          log(
+            "Cancelling old algo order " +
+              algoId +
+              " (" +
+              o.type +
+              " @ " +
+              o.stopPrice +
+              ")...",
+          );
+          try {
+            await futuresDelete("/fapi/v1/algoOrder", { algoId });
+          } catch (e) {
+            log("⚠ Failed to cancel algo order " + algoId + ": " + e);
+          }
+        }
+      }
+    } catch (e) {
+      log("⚠ Could not query/cancel existing algo orders: " + e);
+    }
+
+    // If we kept both, no need to clear standard open orders.
+    // Otherwise clear standard open orders just to be safe.
+    if (!slPlaced || !tpPlaced) {
+      await cancelAllOpenOrders(symbol);
+    }
+  }
+
+  // Now place fresh TP/SL
+  if (sl !== null && !slPlaced) {
+    const isValidSl = exitSide === "SELL" ? sl < markPrice : sl > markPrice;
+    if (isValidSl) {
+      await placeExitOrder(symbol, exitSide, "STOP_MARKET", sl);
+    } else {
+      log(
+        "⚠ Provided SL " +
+          sl +
+          " is invalid against mark price " +
+          markPrice +
+          ". Skipping SL.",
+      );
+    }
+  }
+
+  if (tp !== null && !tpPlaced) {
+    const isValidTp = exitSide === "SELL" ? tp > markPrice : tp < markPrice;
+    if (isValidTp) {
+      await placeExitOrder(symbol, exitSide, "TAKE_PROFIT_MARKET", tp);
+    } else {
+      log(
+        "⚠ Provided TP " +
+          tp +
+          " is invalid against mark price " +
+          markPrice +
+          ". Skipping TP.",
+      );
+    }
+  }
+}
+
+export interface DecisionRecord {
+  timestamp: string;
+  ticker: string;
+  decision: string;
+  reason: string;
+  tp: number | null;
+  sl: number | null;
+  markPrice: number;
+  unRealizedProfit: number;
+  actionTaken: string;
+}
+
+function saveDecisionLog(record: DecisionRecord) {
+  if (DRY_RUN) return;
+  let records: DecisionRecord[] = [];
+  try {
+    if (fs.existsSync(DECISIONS_FILE)) {
+      records = JSON.parse(fs.readFileSync(DECISIONS_FILE, "utf-8"));
+    }
+  } catch (err) {
+    log("⚠ Could not read decisions db: " + String(err));
+  }
+  records.push(record);
+  try {
+    const dir = path.dirname(DECISIONS_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(DECISIONS_FILE, JSON.stringify(records, null, 2), "utf-8");
+  } catch (err) {
+    log("⚠ Could not writing to decisions db: " + String(err));
+  }
+}
 
 async function executeTrade(
   decisionOut: DecisionOutput,
@@ -662,63 +911,84 @@ async function executeTrade(
   const isLong = posAmt > 0.0009;
   const isShort = posAmt < -0.0009;
 
-  if (decision === "HODL") {
-    log("Decision is HODL – trade unchanged. Updating TP/SL if needed...");
-  } else {
+  let finalDecision = decision;
+  if (decision === "BUY" && isLong) {
+    log("Already LONG – decision treated as HODL.");
+    finalDecision = "HODL";
+  } else if (decision === "SELL" && isShort) {
+    log("Already SHORT – decision treated as HODL.");
+    finalDecision = "HODL";
+  }
+
+  let actionTaken = finalDecision;
+
+  if (finalDecision !== "HODL") {
     // Set leverage first
     await setLeverage(symbol, LEVERAGE);
 
-    if (decision === "BUY") {
-      if (isLong) {
-        log("Already LONG – skipping trade entry.");
-      } else {
-        const price = await getMarkPrice(symbol);
-        const qty = calcQty(TRADE_USDT, LEVERAGE, price);
-        if (qty < 0.001)
-          throw new Error("Calculated quantity too small: " + qty);
-        if (isShort) {
-          log("Closing existing SHORT before going LONG...");
-          await placeMarket(symbol, "BUY", Math.abs(posAmt), true);
-        }
-        log(
-          "Opening LONG " +
-            qty +
-            " " +
-            symbol +
-            " @ ~" +
-            price.toFixed(2) +
-            " (" +
-            LEVERAGE +
-            "x)",
-        );
-        await placeMarket(symbol, "BUY", qty);
-      }
-    } else if (decision === "SELL") {
+    if (finalDecision === "BUY") {
       if (isShort) {
-        log("Already SHORT – skipping trade entry.");
-      } else {
-        const price = await getMarkPrice(symbol);
-        const qty = calcQty(TRADE_USDT, LEVERAGE, price);
-        if (qty < 0.001)
-          throw new Error("Calculated quantity too small: " + qty);
-        if (isLong) {
-          log("Closing existing LONG before going SHORT...");
-          await placeMarket(symbol, "SELL", Math.abs(posAmt), true);
-        }
-        log(
-          "Opening SHORT " +
-            qty +
-            " " +
-            symbol +
-            " @ ~" +
-            price.toFixed(2) +
-            " (" +
-            LEVERAGE +
-            "x)",
-        );
-        await placeMarket(symbol, "SELL", qty);
+        log("Closing existing SHORT before going LONG...");
+        await placeMarket(symbol, "BUY", Math.abs(posAmt), true);
+        await cancelAllOpenOrders(symbol);
       }
+
+      const price = await getMarkPrice(symbol);
+      const availableUsdt = await getUsdtBalance();
+      // Use 98% of available margin to avoid "Insufficient Margin" due to fees or slight price moves
+      const tradeAmount = availableUsdt * 0.98;
+      if (tradeAmount < 5)
+        throw new Error("Available USDT too low: " + availableUsdt.toFixed(2));
+      const qty = calcQty(tradeAmount, LEVERAGE, price);
+      if (qty < 0.001) throw new Error("Calculated quantity too small: " + qty);
+
+      log(
+        "Opening LONG " +
+          qty +
+          " " +
+          symbol +
+          " @ ~" +
+          price.toFixed(2) +
+          " (" +
+          LEVERAGE +
+          "x, margin ~" +
+          tradeAmount.toFixed(2) +
+          " USDT)",
+      );
+      await placeMarket(symbol, "BUY", qty);
+    } else if (finalDecision === "SELL") {
+      if (isLong) {
+        log("Closing existing LONG before going SHORT...");
+        await placeMarket(symbol, "SELL", Math.abs(posAmt), true);
+        await cancelAllOpenOrders(symbol);
+      }
+
+      const price = await getMarkPrice(symbol);
+      const availableUsdt = await getUsdtBalance();
+      // Use 98% of available margin to avoid "Insufficient Margin" due to fees or slight price moves
+      const tradeAmount = availableUsdt * 0.98;
+      if (tradeAmount < 5)
+        throw new Error("Available USDT too low: " + availableUsdt.toFixed(2));
+      const qty = calcQty(tradeAmount, LEVERAGE, price);
+      if (qty < 0.001) throw new Error("Calculated quantity too small: " + qty);
+
+      log(
+        "Opening SHORT " +
+          qty +
+          " " +
+          symbol +
+          " @ ~" +
+          price.toFixed(2) +
+          " (" +
+          LEVERAGE +
+          "x, margin ~" +
+          tradeAmount.toFixed(2) +
+          " USDT)",
+      );
+      await placeMarket(symbol, "SELL", qty);
     }
+  } else {
+    log("Decision is HODL – checking existing position for TP/SL updates...");
   }
 
   // After potentially entering/exiting, refetch position risk to see if we have an active position
@@ -727,53 +997,26 @@ async function executeTrade(
   const finalIsShort = finalPos.positionAmt < -0.0009;
 
   if (finalIsLong || finalIsShort) {
-    // We have a position running. Cancel old orders and set new TP/SL.
-    log("Position is currently active. Refreshing TP/SL...");
-    await cancelAllOpenOrders(symbol);
-
-    // For a LONG, exit side is SELL. For a SHORT, exit side is BUY.
+    // We have a position running. Place TP/SL if missing.
     const exitSide = finalIsLong ? "SELL" : "BUY";
-
-    if (sl !== null) {
-      // Basic validation: SL for long must be below mark price. SL for short must be above mark price.
-      const isValidSl = finalIsLong
-        ? sl < finalPos.markPrice
-        : sl > finalPos.markPrice;
-      if (isValidSl) {
-        await placeExitOrder(symbol, exitSide, "STOP_MARKET", sl);
-      } else {
-        log(
-          "⚠ Provided SL " +
-            sl +
-            " is invalid against mark price " +
-            finalPos.markPrice +
-            ". Skipping SL.",
-        );
-      }
-    }
-
-    if (tp !== null) {
-      // Basic validation: TP for long must be above mark price. TP for short must be below mark price.
-      const isValidTp = finalIsLong
-        ? tp > finalPos.markPrice
-        : tp < finalPos.markPrice;
-      if (isValidTp) {
-        await placeExitOrder(symbol, exitSide, "TAKE_PROFIT_MARKET", tp);
-      } else {
-        log(
-          "⚠ Provided TP " +
-            tp +
-            " is invalid against mark price " +
-            finalPos.markPrice +
-            ". Skipping TP.",
-        );
-      }
-    }
+    await ensureTpSl(symbol, exitSide, tp, sl, finalPos.markPrice);
   } else {
     // Flattened or no position. Clean up orders.
     log("No active position remaining. Cancelling any open orders.");
     await cancelAllOpenOrders(symbol);
   }
+
+  saveDecisionLog({
+    timestamp: new Date().toISOString(),
+    ticker: symbol,
+    decision,
+    reason: decisionOut.reason,
+    tp,
+    sl,
+    markPrice: finalPos.markPrice,
+    unRealizedProfit: finalPos.unRealizedProfit,
+    actionTaken,
+  });
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -786,8 +1029,7 @@ async function main() {
       TICKER +
       "  leverage=" +
       LEVERAGE +
-      "x  tradeUsdt=" +
-      TRADE_USDT,
+      "x  tradeUsdt=ALL_AVAILABLE",
   );
   if (DRY_RUN) log("*** DRY_RUN MODE – no orders will be placed ***");
 
