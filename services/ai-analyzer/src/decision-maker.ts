@@ -6,7 +6,7 @@
  *   pnpm run decide [TICKER] [DATE]
  *   pnpm tsx src/decision-maker/decision-maker.ts BTCUSDT 2026-03-14
  *
- * Reads results/{TICKER}/{DATE}_state.json, fetches the latest 500 1h candles
+ * Reads results/{TICKER}/{DATE}_state.json, fetches the latest 500 4h candles
  * from Binance (with EMA9/21, RSI14, candlestick pattern labels per row),
  * then asks Gemini for a BUY / SELL / HODL decision.
  *
@@ -85,7 +85,7 @@ interface Candle {
 
 async function fetchCandles(
   symbol: string,
-  interval = "1h",
+  interval = "4h",
   limit = 500,
 ): Promise<Candle[]> {
   const url =
@@ -234,7 +234,7 @@ function buildCandleSection(candles: Candle[]): string {
       new Date(first.openTime).toISOString() +
       " to " +
       new Date(last.closeTime).toISOString(),
-    "Candles: " + candles.length + " x 1h",
+    "Candles: " + candles.length + " x 4h",
     "First Open   : " + parseFloat(first.open).toFixed(2),
     "Latest Close : " + parseFloat(last.close).toFixed(2),
     "Period High  : " + periodHigh.toFixed(2),
@@ -337,7 +337,7 @@ async function askGemini(
     state.finalTradeDecision ?? "N/A",
     "",
     "---",
-    "## LIVE BINANCE CANDLE DATA (500 x 1h)",
+    "## LIVE BINANCE CANDLE DATA (500 x 4h)",
     "",
     candleSection,
     "",
@@ -418,7 +418,7 @@ async function main() {
   console.log("✓ Loaded analysis state from " + stateFilePath);
 
   // 4. Fetch Binance candles
-  console.log("► Fetching latest 500 × 1h candles for " + TICKER + "...");
+  console.log("► Fetching latest 500 × 4h candles for " + TICKER + "...");
   const candles = await fetchCandles(TICKER);
   const lastClose = candles[candles.length - 1]?.close ?? "?";
   console.log(

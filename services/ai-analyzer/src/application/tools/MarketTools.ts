@@ -18,7 +18,7 @@ export const createMarketTools = (marketProvider: IMarketDataProvider) => {
         interval: z
           .string()
           .optional()
-          .describe("The candlestick interval (e.g., 1h, 1d)"),
+          .describe("The candlestick interval (e.g., 4h, 1d)"),
         limit: z.number().optional().describe("Number of candles to fetch"),
       }),
     },

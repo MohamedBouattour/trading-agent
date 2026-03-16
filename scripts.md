@@ -1,54 +1,67 @@
 # Deployment & Operations Scripts
 
-This document outlines the standard commands to build the trading bot, push it to your registry, pull it on the Ubuntu server, run it, and monitor the logs.
+## 1. Trading Bot (Direct Cronjob)
 
-## 1. Local Machine: Build & Push
+The bot now runs as a standalone Node.js script via a system cronjob on your VPS, completely bypassing Docker.
 
-_Avoid using `--no-cache` on daily builds to save time – Docker will skip re-downloading things that haven't changed._
-
-```bash
-# Set buildkit to make builds faster
-$env:DOCKER_BUILDKIT=1
-
-# Build the image using cache
-docker build -t devmed555/trading-bot:latest .
-
-# Push to your registry so the server can access it
-docker push devmed555/trading-bot:latest
-```
-
-## 2. Server (Ubuntu): Pull & Deploy
-
-_Run these commands on your VPS (`ssh ubuntu@79.137.14.75`). Make sure you are in the `/home/ubuntu/TradingAgents` directory where your `docker-compose.yml` lives._
+### Local Machine: Build
 
 ```bash
-# Pull the latest changes from Docker Hub
-docker pull devmed555/trading-bot:latest
-
-# Restart the container in the background to apply the new image
-docker compose up -d
+# Build the TypeScript bot into /dist/bot.cjs
+npm run build:bot
 ```
 
-## 3. Server: Monitor Logs
+### Server (Ubuntu): Setup
 
-Once the container is running, use these commands to ensure it's executing tasks successfully:
+Ensure you have Node.js and the `results/` directory on your VPS.
 
-**Option A: View the raw output from bot.ts (Best for checking signals)**
-The bot writes an organized log into the mounted `logs/` directory.
+**Add to Crontab (`crontab -e`):**
 
 ```bash
-tail -f logs/bot.log
+# Run every 4 hours
+0 */4 * * * cd /home/ubuntu/bot && node services/trading-bot/dist/bot.cjs >> /home/ubuntu/bot/output.log 2>&1
 ```
 
-**Option B: View Docker container stdout logs**
-This shows the entrypoint logs and standard JS output.
+---
+
+## 2. Webapp (Standalone Docker)
+
+The webapp remains a premium standalone container.
+
+### Local Machine: Build & Push
 
 ```bash
-docker compose logs -f trading-bot
+# 1. Build the webapp image
+docker build -t devmed555/trading-webapp:latest ./services/webapp
+
+# 2. Push to Docker Hub
+docker push devmed555/trading-webapp:latest
 ```
 
-## Useful Commands
+### Server (Ubuntu): Run
 
-- **Stop the bot:** `docker compose down`
-- **Restart the bot:** `docker compose restart`
-- **Check if the container is running:** `docker ps`
+Ensure `docker-compose.webapp.yml` is on your VPS.
+
+```bash
+# 1. Pull the latest image
+docker pull devmed555/trading-webapp:latest
+
+# 2. Start the container
+docker compose up -d --remove-orphans
+```
+
+---
+
+## 3. Monitoring
+
+### Bot Logs
+
+```bash
+tail -f /home/ubuntu/bot/output.log
+```
+
+### Webapp Logs
+
+```bash
+docker compose -f docker-compose.webapp.yml logs -f webapp
+```

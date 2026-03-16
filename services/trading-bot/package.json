@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "build": "tsup",
-    "bot": "tsx src/index.ts",
-    "bot:dry": "DRY_RUN=true tsx src/index.ts"
+    "start": "tsx src/bot.ts",
+    "build": "tsup src/bot.ts --clean",
+    "bot": "tsx src/bot.ts",
+    "bot:dry": "DRY_RUN=true tsx src/bot.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.1.32",

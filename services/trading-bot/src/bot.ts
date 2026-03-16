@@ -4,7 +4,7 @@
  *
  * Runs every hour (via cron inside Docker).
  * 1. Finds the latest analysis state.json for TICKER
- * 2. Fetches 500 × 1h Binance candles
+ * 2. Fetches 500 × 4h Binance candles
  * 3. Asks Gemini for BUY / SELL / HODL
  * 4. Checks current Binance Futures position
  * 5. Executes trade if decision differs from current position
@@ -366,7 +366,7 @@ interface Candle {
 
 async function fetchCandles(
   symbol: string,
-  interval = "1h",
+  interval = "4h",
   limit = 500,
 ): Promise<Candle[]> {
   const url =
@@ -624,7 +624,7 @@ async function getDecision(
     "=== MULTI-AGENT ANALYSIS REPORT (" + ticker + " / " + date + ") ===",
     reportSection,
     "",
-    "=== LIVE BINANCE 1H CANDLES (500) ===",
+    "=== LIVE BINANCE 4h CANDLES (500) ===",
     candleSection,
     "",
     "Reply ONLY with the JSON. tp and sl must always be numbers.",
@@ -1063,7 +1063,7 @@ async function main() {
   }
 
   // 2. Fetch candles
-  log("Fetching 500 × 1h candles for " + TICKER + "...");
+  log("Fetching 500 × 4h candles for " + TICKER + "...");
   const candles = await fetchCandles(TICKER);
   log(
     "Candles fetched: " +

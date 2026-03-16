@@ -6,6 +6,7 @@
   },
   "scripts": {
     "build": "pnpm -r run build",
+    "build:bot": "pnpm --filter trading-bot run build",
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint"
   }
